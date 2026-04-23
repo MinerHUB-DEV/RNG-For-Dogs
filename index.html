@@ -14,7 +14,7 @@
         body { margin: 0; font-family: 'Segoe UI', sans-serif; background: var(--bg-color); color: white; text-align: center; transition: background 0.5s; overflow-x: hidden; }
         .nav { display: flex; justify-content: center; background: rgba(0,0,0,0.5); padding: 10px; position: sticky; top: 0; z-index: 100; border-bottom: 2px solid var(--accent); }
         .nav button { margin: 0 5px; padding: 10px 15px; border: none; border-radius: 5px; background: var(--card-bg); color: white; cursor: pointer; font-weight: bold; }
-        .stats-bar { background: var(--card-bg); padding: 12px; font-weight: bold; display: flex; justify-content: center; gap: 20px; font-size: 1.1em; }
+        .stats-bar { background: var(--card-bg); padding: 12px; font-weight: bold; display: flex; justify-content: center; gap: 20px; font-size: 1.1em; flex-wrap: wrap; }
         
         .panel { display: none; padding: 20px; animation: fadeIn 0.4s; }
         .panel.active { display: block; }
@@ -22,7 +22,6 @@
 
         .card { background: var(--card-bg); max-width: 450px; margin: auto; padding: 25px; border-radius: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid var(--accent); }
         
-        /* POLL STYLING WITH TIMER */
         .poll-overlay { display: none; position: fixed; bottom: 20px; right: 20px; width: 280px; background: #fff; color: #333; padding: 20px; border-radius: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); z-index: 2000; text-align: center; border: 3px solid var(--accent); animation: slideUp 0.5s ease-out; }
         @keyframes slideUp { from { transform: translateY(100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
         .poll-btns { display: flex; gap: 10px; justify-content: center; margin-top: 15px; }
@@ -73,6 +72,9 @@
         .prize-table { width: 100%; margin-top: 20px; border-collapse: collapse; background: rgba(0,0,0,0.2); border-radius: 10px; overflow: hidden; }
         .prize-table th, .prize-table td { padding: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 0.9em; }
         .prize-table th { background: var(--accent); color: white; }
+
+        .leaderboard-box { background: rgba(0,0,0,0.3); border-radius: 10px; padding: 10px; margin-top: 15px; text-align: left; max-height: 200px; overflow-y: auto; }
+        .lb-entry { display: flex; justify-content: space-between; padding: 5px; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 0.9em; }
     </style>
 </head>
 <body>
@@ -100,6 +102,7 @@
 <div class="stats-bar">
     <span>💰 <span id="coinCount">0</span></span>
     <span>🍀 Luck: +<span id="luckCount">0</span>% <span id="luckTimer" class="timer-txt"></span></span>
+    <span style="color: #00ffcc;">👥 Online: <span id="playerCount">1</span></span>
 </div>
 
 <div id="roll" class="panel active">
@@ -113,7 +116,12 @@
 
 <div id="inv" class="panel">
     <div class="card">
-        <h2>📦 Your Inventory</h2>
+        <h2>🏆 Secret Finders</h2>
+        <div id="leaderboardList" class="leaderboard-box">
+            <div style="text-align:center; opacity:0.5;">Loading Global Data...</div>
+        </div>
+        
+        <h2 style="margin-top:20px;">📦 Your Inventory</h2>
         <div id="inventoryList"></div>
     </div>
 </div>
@@ -189,12 +197,14 @@
 <script>
 /* --- FIREBASE CONFIG --- */
 const FB_URL = "https://dogrng-82d7a-default-rtdb.firebaseio.com/";
+const SESSION_ID = Math.random().toString(36).substr(2, 9);
 
 /* --- DATA --- */
+let username = localStorage.getItem('dogRNG_user') || "Player_" + SESSION_ID.substr(0,4);
 let coins = 0;
 let inventory = [];
 let luckEndTime = 0;
-let luckPower = 30;
+let luckPower = 0;
 let lastWheelSpin = 0;
 let rollCooldownEnd = 0;
 let isRolling = false;
@@ -203,7 +213,7 @@ let activeThemeName = 'Midnight';
 let isAdmin = false;
 let pollVotes = { yes: 0, no: 0 };
 let pollInterval = null;
-let lastBroadcast = "";
+let lastBroadcastTime = localStorage.getItem('dogRNG_lastMsgTime') || 0; // Fix: Persistent check
 let lastGiftTime = 0;
 
 const dogs = [
@@ -229,49 +239,71 @@ const rarityData = {
     secret: { price: 5000 }
 };
 
-/* --- FIREBASE SYNC LOGIC --- */
+/* --- FIREBASE SYNC --- */
 async function syncGlobal() {
     try {
+        fetch(`${FB_URL}online/${SESSION_ID}.json`, { method: 'PUT', body: JSON.stringify(Date.now()) });
         const res = await fetch(`${FB_URL}.json`);
         const data = await res.json();
         if(!data) return;
-
-        // 1. Broadcast Message
-        if(data.broadcast && data.broadcast !== lastBroadcast) {
-            showBroadcast(data.broadcast);
-            lastBroadcast = data.broadcast;
+        
+        if(data.online) {
+            let active = 0;
+            const now = Date.now();
+            Object.values(data.online).forEach(t => { if(now - t < 10000) active++; });
+            document.getElementById("playerCount").innerText = active;
+        }
+        
+        if(data.leaderboard) {
+            let lbHtml = "";
+            let sorted = Object.values(data.leaderboard).sort((a,b) => b.time - a.time).slice(0, 10);
+            sorted.forEach(e => {
+                lbHtml += `<div class="lb-entry"><span class="secret">${e.dog}</span> <span>by ${e.user}</span></div>`;
+            });
+            document.getElementById("leaderboardList").innerHTML = lbHtml || "No secrets yet!";
         }
 
-        // 2. Global Gift (Coins)
+        // FIX: Only show broadcast if it's NEWER than our last recorded time
+        if(data.broadcast && data.broadcast.timestamp > lastBroadcastTime) {
+            showBroadcast(data.broadcast.text);
+            lastBroadcastTime = data.broadcast.timestamp;
+            localStorage.setItem('dogRNG_lastMsgTime', lastBroadcastTime);
+        }
+
         if(data.giftTimestamp && data.giftTimestamp > lastGiftTime) {
             coins += data.giftAmount || 0;
             lastGiftTime = data.giftTimestamp;
             showBroadcast(`🎁 RECEIVED ${data.giftAmount} GLOBAL COINS!`);
             saveGame();
         }
-
-        // 3. Global Luck
+        
         if(data.globalLuck && data.globalLuck.endTime > Date.now()) {
             luckEndTime = data.globalLuck.endTime;
             luckPower = data.globalLuck.power;
         }
-        
-    } catch(e) { console.error("Sync Error", e); }
+    } catch(e) {}
 }
 
-/* --- ADMIN ACTIONS (FIREBASE) --- */
+async function logSecretToGlobal(dogName) {
+    await fetch(`${FB_URL}leaderboard.json`, { method: 'POST', body: JSON.stringify({ user: username, dog: dogName, time: Date.now() }) });
+}
+
+/* --- ADMIN ACTIONS --- */
 async function adminGlobalBroadcast() {
     let msg = prompt("Enter Global Message:");
-    if(msg) await fetch(`${FB_URL}broadcast.json`, { method: 'PUT', body: JSON.stringify(`GLOBAL: ${msg}`) });
+    if(msg) {
+        // FIX: Send as an object with a timestamp
+        await fetch(`${FB_URL}broadcast.json`, { 
+            method: 'PUT', 
+            body: JSON.stringify({ text: `GLOBAL: ${msg}`, timestamp: Date.now() }) 
+        });
+    }
 }
 
 async function adminAddGlobalCoins() {
     let amount = prompt("How many coins for everyone?", "10000");
     if(amount) {
-        await fetch(`${FB_URL}.json`, { 
-            method: 'PATCH', 
-            body: JSON.stringify({ giftAmount: parseInt(amount), giftTimestamp: Date.now() }) 
-        });
+        await fetch(`${FB_URL}.json`, { method: 'PATCH', body: JSON.stringify({ giftAmount: parseInt(amount), giftTimestamp: Date.now() }) });
     }
 }
 
@@ -281,125 +313,11 @@ async function adminCustomGlobalLuck() {
     if(duration && power) {
         let luckData = { endTime: Date.now() + (parseInt(duration) * 60000), power: parseInt(power) };
         await fetch(`${FB_URL}globalLuck.json`, { method: 'PUT', body: JSON.stringify(luckData) });
-        await fetch(`${FB_URL}broadcast.json`, { method: 'PUT', body: JSON.stringify(`🌟 GLOBAL LUCK: +${power}% for ${duration}m!`) });
-    }
-}
-
-/* --- SAVING SYSTEM --- */
-function saveGame() {
-    const gameState = { coins, inventory, luckEndTime, luckPower, lastWheelSpin, ownedThemes, activeThemeName, isAdmin, pollVotes, lastGiftTime };
-    localStorage.setItem('dogRNG_save', JSON.stringify(gameState));
-}
-
-function loadGame() {
-    const saved = localStorage.getItem('dogRNG_save');
-    if (saved) {
-        const data = JSON.parse(saved);
-        coins = data.coins || 0;
-        inventory = data.inventory || [];
-        luckEndTime = data.luckEndTime || 0;
-        luckPower = data.luckPower || 30;
-        lastWheelSpin = data.lastWheelSpin || 0;
-        ownedThemes = data.ownedThemes || ['Midnight'];
-        activeThemeName = data.activeThemeName || 'Midnight';
-        isAdmin = data.isAdmin || false;
-        pollVotes = data.pollVotes || { yes: 0, no: 0 };
-        lastGiftTime = data.lastGiftTime || 0;
-
-        if(isAdmin) document.getElementById("adminTabBtn").style.display = "block";
-        const activeThemeObj = inventory.find(i => i.type === 'theme' && i.name.startsWith(activeThemeName)) || 
-                               {name:'Midnight', bg:'#1a1a2e', card:'#16213e', accent:'#533483'};
-        changeTheme(activeThemeName, activeThemeObj.bg, activeThemeObj.card, activeThemeObj.accent);
-        ownedThemes.forEach(t => { const btn = document.getElementById("shop-" + t); if(btn) btn.innerText = "Owned"; });
-        updatePollUI();
-    }
-}
-
-/* --- TIMED POLL LOGIC --- */
-function adminCreatePoll() {
-    let question = prompt("Enter Poll Question:");
-    if (!question) return;
-    
-    let seconds = prompt("How many SECONDS should the poll last?", "30");
-    let timeLeft = parseInt(seconds);
-    
-    if (isNaN(timeLeft) || timeLeft <= 0) {
-        alert("Please enter a valid number of seconds.");
-        return;
-    }
-
-    pollVotes = { yes: 0, no: 0 };
-    document.getElementById("pollQuestion").innerText = question;
-    document.getElementById("pollBox").style.display = "block";
-    document.getElementById("pollStats").style.display = "block";
-    updatePollUI();
-    
-    if (pollInterval) clearInterval(pollInterval);
-    
-    pollInterval = setInterval(() => {
-        timeLeft--;
-        document.getElementById("pollTimeRemaining").innerText = `Ends in: ${timeLeft}s`;
-        
-        if (timeLeft <= 0) {
-            clearInterval(pollInterval);
-            document.getElementById("pollBox").style.display = "none";
-            showBroadcast(`POLL ENDED! Yes: ${pollVotes.yes} | No: ${pollVotes.no}`);
-        }
-    }, 1000);
-
-    showBroadcast(`ADMIN STARTED A ${seconds}s POLL!`);
-    saveGame();
-}
-
-function submitVote(type) {
-    pollVotes[type]++;
-    document.getElementById("pollBox").style.display = "none";
-    updatePollUI();
-    saveGame();
-}
-
-function updatePollUI() {
-    document.getElementById("countYes").innerText = pollVotes.yes;
-    document.getElementById("countNo").innerText = pollVotes.no;
-}
-
-/* --- CORE GAMEPLAY --- */
-function tab(id) {
-    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-    document.getElementById(id).classList.add('active');
-}
-
-function updateUI() {
-    document.getElementById("coinCount").innerText = coins;
-    let now = Date.now();
-    if (now < luckEndTime) {
-        let diff = Math.ceil((luckEndTime - now) / 1000);
-        document.getElementById("luckCount").innerText = luckPower;
-        document.getElementById("luckTimer").innerText = `(${Math.floor(diff/60)}:${(diff%60).toString().padStart(2,'0')})`;
-    } else {
-        document.getElementById("luckCount").innerText = "0";
-        document.getElementById("luckTimer").innerText = "";
-    }
-
-    let rollBtn = document.getElementById("rollBtn");
-    let coolLabel = document.getElementById("rollCooldown");
-    if (now < rollCooldownEnd && !isRolling) {
-        let rDiff = Math.ceil((rollCooldownEnd - now) / 1000);
-        rollBtn.disabled = true;
-        coolLabel.innerText = `Cooldown: ${rDiff}s`;
-    } else if (!isRolling) {
-        rollBtn.disabled = false;
-        coolLabel.innerText = "";
-    }
-
-    let wheelReadyAt = lastWheelSpin + 1800000; 
-    if (now < wheelReadyAt) {
-        let wDiff = Math.ceil((wheelReadyAt - now) / 1000);
-        document.getElementById("wheelTimer").innerText = `Wait: ${Math.floor(wDiff/60)}m ${wDiff%60}s`;
-        document.getElementById("wheelBtn").disabled = true;
-    } else {
-        document.getElementById("wheelTimer").innerText = "Ready!";
-        document.getElementById("wheelBtn").disabled = false;
+        // Use the new timestamped broadcast format
+        await fetch(`${FB_URL}broadcast.json`, { 
+            method: 'PUT', 
+            body: JSON.stringify({ text: `🌟 GLOBAL LUCK: +${power}% for ${duration}m!`, timestamp: Date.now() }) 
+        });
     }
 }
 
@@ -419,6 +337,74 @@ function adminGlobalGiftDog() {
 
 function adminResetAll() {
     if(confirm("DANGER: This wipes data locally. Continue?")) { localStorage.clear(); location.reload(); }
+}
+
+/* --- SAVING SYSTEM --- */
+function saveGame() {
+    const gameState = { coins, inventory, luckEndTime, luckPower, lastWheelSpin, ownedThemes, activeThemeName, isAdmin, pollVotes, lastGiftTime, username };
+    localStorage.setItem('dogRNG_save', JSON.stringify(gameState));
+}
+
+function loadGame() {
+    const saved = localStorage.getItem('dogRNG_save');
+    if (saved) {
+        const data = JSON.parse(saved);
+        coins = data.coins || 0;
+        inventory = data.inventory || [];
+        luckEndTime = data.luckEndTime || 0;
+        luckPower = data.luckPower || 0; 
+        lastWheelSpin = data.lastWheelSpin || 0;
+        ownedThemes = data.ownedThemes || ['Midnight'];
+        activeThemeName = data.activeThemeName || 'Midnight';
+        isAdmin = data.isAdmin || false;
+        pollVotes = data.pollVotes || { yes: 0, no: 0 };
+        lastGiftTime = data.lastGiftTime || 0;
+        username = data.username || username;
+        if(isAdmin) document.getElementById("adminTabBtn").style.display = "block";
+        
+        const activeThemeObj = inventory.find(i => i.type === 'theme' && i.name.startsWith(activeThemeName)) || {name:'Midnight', bg:'#1a1a2e', card:'#16213e', accent:'#533483'};
+        changeTheme(activeThemeName, activeThemeObj.bg, activeThemeObj.card, activeThemeObj.accent);
+        ownedThemes.forEach(t => { const btn = document.getElementById("shop-" + t); if(btn) btn.innerText = "Owned"; });
+        updatePollUI();
+    }
+}
+
+/* --- CORE GAMEPLAY --- */
+function tab(id) {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+}
+
+function updateUI() {
+    document.getElementById("coinCount").innerText = coins;
+    let now = Date.now();
+    if (now < luckEndTime) {
+        let diff = Math.ceil((luckEndTime - now) / 1000);
+        document.getElementById("luckCount").innerText = luckPower;
+        document.getElementById("luckTimer").innerText = `(${Math.floor(diff/60)}:${(diff%60).toString().padStart(2,'0')})`;
+    } else {
+        document.getElementById("luckCount").innerText = "0";
+        document.getElementById("luckTimer").innerText = "";
+    }
+    let rollBtn = document.getElementById("rollBtn");
+    let coolLabel = document.getElementById("rollCooldown");
+    if (now < rollCooldownEnd && !isRolling) {
+        let rDiff = Math.ceil((rollCooldownEnd - now) / 1000);
+        rollBtn.disabled = true;
+        coolLabel.innerText = `Cooldown: ${rDiff}s`;
+    } else if (!isRolling) {
+        rollBtn.disabled = false;
+        coolLabel.innerText = "";
+    }
+    let wheelReadyAt = lastWheelSpin + 1800000; 
+    if (now < wheelReadyAt) {
+        let wDiff = Math.ceil((wheelReadyAt - now) / 1000);
+        document.getElementById("wheelTimer").innerText = `Wait: ${Math.floor(wDiff/60)}m ${wDiff%60}s`;
+        document.getElementById("wheelBtn").disabled = true;
+    } else {
+        document.getElementById("wheelTimer").innerText = "Ready!";
+        document.getElementById("wheelBtn").disabled = false;
+    }
 }
 
 function showBroadcast(text) {
@@ -465,14 +451,13 @@ async function roll() {
             document.getElementById("img").src = nextImg;
             let currentLuck = (Date.now() < luckEndTime) ? luckPower : 0;
             let r = Math.random() * 100 - (currentLuck / 3);
-            
             let rarity = "common";
             let dogPool = dogs.filter(d => d.r === "common");
             let dogName = dogPool[Math.floor(Math.random() * dogPool.length)].name;
-
             if (r < 0.1) {
                 rarity = "secret";
                 dogName = secretDogs[Math.floor(Math.random() * secretDogs.length)].name;
+                logSecretToGlobal(dogName);
             } else if (r < 1.0) {
                 rarity = "legendary";
                 let pool = dogs.filter(d => d.r === "legendary");
@@ -486,7 +471,6 @@ async function roll() {
                 let pool = dogs.filter(d => d.r === "rare");
                 dogName = pool[Math.floor(Math.random() * pool.length)].name;
             }
-
             inventory.push({ name: dogName, rarity: rarity, type: "dog" });
             let res = document.getElementById("result");
             res.innerText = rarity.toUpperCase() + " " + dogName;
@@ -522,7 +506,7 @@ function sell(index) {
 function buyLuck(cost, mins) {
     if (coins >= cost) {
         coins -= cost;
-        luckPower = 30;
+        luckPower = 30; 
         luckEndTime = Math.max(luckEndTime, Date.now()) + (mins * 60 * 1000);
         updateUI(); saveGame();
     }
@@ -545,6 +529,7 @@ function spinWheel() {
             let secretDog = secretDogs[Math.floor(Math.random() * secretDogs.length)];
             inventory.push({ name: secretDog.name, rarity: "secret", type: "dog" });
             wheelDisp.innerText = secretDog.name + "!";
+            logSecretToGlobal(secretDog.name);
         } else {
             let gain = Math.floor(Math.random() * 200) + 50;
             coins += gain;
@@ -563,14 +548,9 @@ function redeemCode() {
         fb.innerText = "Admin Panel Unlocked!";
         fb.style.color = "#00ffcc";
         saveGame();
-    } else if (code === "0WNER") {
-        if (!ownedThemes.includes("Rainbow")) {
-            inventory.push({ name: "Rainbow Theme", type: "theme", bg: "linear-gradient(45deg, red, blue)", card: "rgba(0,0,0,0.7)", accent: "white" });
-            ownedThemes.push("Rainbow");
-            document.getElementById("claimText").style.display = "block";
-            updateInv(); saveGame();
-            setTimeout(() => document.getElementById("claimText").style.display = "none", 3000);
-        }
+    } else if (code.toLowerCase() === "setname") {
+        let n = prompt("Enter new username:");
+        if(n) { username = n; fb.innerText = "Name updated!"; saveGame(); }
     } else if (code.toLowerCase() === "doglover") {
         coins += 500; fb.innerText = "Success! +500 Coins!";
         fb.style.color = "lightgreen"; saveGame();
@@ -582,8 +562,47 @@ function redeemCode() {
     document.getElementById("codeInput").value = "";
 }
 
+function adminCreatePoll() {
+    let question = prompt("Enter Poll Question:");
+    if (!question) return;
+    let seconds = prompt("Seconds:", "30");
+    let timeLeft = parseInt(seconds);
+    pollVotes = { yes: 0, no: 0 };
+    document.getElementById("pollQuestion").innerText = question;
+    document.getElementById("pollBox").style.display = "block";
+    document.getElementById("pollStats").style.display = "block";
+    updatePollUI();
+    if (pollInterval) clearInterval(pollInterval);
+    pollInterval = setInterval(() => {
+        timeLeft--;
+        document.getElementById("pollTimeRemaining").innerText = `Ends in: ${timeLeft}s`;
+        if (timeLeft <= 0) {
+            clearInterval(pollInterval);
+            document.getElementById("pollBox").style.display = "none";
+            showBroadcast(`POLL ENDED! Yes: ${pollVotes.yes} | No: ${pollVotes.no}`);
+        }
+    }, 1000);
+    // Use timestamped broadcast
+    fetch(`${FB_URL}broadcast.json`, { 
+        method: 'PUT', 
+        body: JSON.stringify({ text: `ADMIN STARTED A ${seconds}s POLL!`, timestamp: Date.now() }) 
+    });
+}
+
+function submitVote(type) {
+    pollVotes[type]++;
+    document.getElementById("pollBox").style.display = "none";
+    updatePollUI();
+    saveGame();
+}
+
+function updatePollUI() {
+    document.getElementById("countYes").innerText = pollVotes.yes;
+    document.getElementById("countNo").innerText = pollVotes.no;
+}
+
 setInterval(updateUI, 1000);
-setInterval(syncGlobal, 3000); // Checks Firebase every 3 seconds
+setInterval(syncGlobal, 4000);
 loadGame();
 updateUI();
 updateInv();
