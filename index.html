@@ -101,6 +101,7 @@
 
 <div class="stats-bar">
     <span>💰 <span id="coinCount">0</span></span>
+    <span>🎡 Spins: <span id="spinCount">0</span></span>
     <span>🍀 Luck: +<span id="luckCount">0</span>% <span id="luckTimer" class="timer-txt"></span></span>
     <span style="color: #00ffcc;">👥 Online: <span id="playerCount">1</span></span>
 </div>
@@ -146,7 +147,7 @@
 
 <div id="wheel" class="panel">
     <div class="card">
-        <h2>🎡 30-Min Spin</h2>
+        <h2>🎡 Reward Wheel</h2>
         <div id="wheel-display">READY</div>
         <button class="btn" id="wheelBtn" onclick="spinWheel()">SPIN WHEEL</button>
         <p id="wheelTimer" class="timer-txt"></p>
@@ -187,7 +188,8 @@
         </div>
 
         <button class="btn" style="background:#00ffcc; color:black; width: 100%; margin-bottom: 10px;" onclick="adminCustomGlobalLuck()">✨ CUSTOM GLOBAL LUCK</button>
-        <button class="btn" style="background:#9b59b6; color:white; width: 100%; margin-bottom: 10px;" onclick="adminGlobalGiftDog()">🎁 GIFT GLOBAL DOG</button>
+        <button class="btn" style="background:#9b59b6; color:white; width: 100%; margin-bottom: 10px;" onclick="adminGlobalGiftSpins()">🎡 GIFT GLOBAL SPINS</button>
+        
         <button class="btn" style="background:#f1c40f; color:black; width: 100%; margin-bottom: 10px;" onclick="adminAddGlobalCoins()">💰 ADD 10,000 COINS</button>
         <button class="btn" style="background:#3498db; width: 100%; margin-bottom: 10px;" onclick="adminGlobalBroadcast()">📣 SEND GLOBAL MESSAGE</button>
         <button class="btn" style="background:#444; width: 100%;" onclick="adminResetAll()">⚙️ RESET SYSTEM DATA</button>
@@ -202,6 +204,7 @@ const SESSION_ID = Math.random().toString(36).substr(2, 9);
 /* --- DATA --- */
 let username = localStorage.getItem('dogRNG_user') || "Player_" + SESSION_ID.substr(0,4);
 let coins = 0;
+let wheelSpins = 0; // New local variable
 let inventory = [];
 let luckEndTime = 0;
 let luckPower = 0;
@@ -212,9 +215,10 @@ let ownedThemes = ['Midnight'];
 let activeThemeName = 'Midnight';
 let isAdmin = false;
 let pollVotes = { yes: 0, no: 0 };
-let pollInterval = null;
-let lastBroadcastTime = localStorage.getItem('dogRNG_lastMsgTime') || 0; // Fix: Persistent check
-let lastGiftTime = 0;
+
+let lastBroadcastTime = parseInt(localStorage.getItem('dogRNG_lastMsgTime')) || 0;
+let lastGiftTime = parseInt(localStorage.getItem('dogRNG_lastGiftTime')) || 0;
+let lastSpinGiftTime = parseInt(localStorage.getItem('dogRNG_lastSpinGiftTime')) || 0;
 
 const dogs = [
     {name: "Beagle", r: "common"}, {name: "Husky", r: "common"}, {name: "Corgi", r: "common"}, 
@@ -263,7 +267,6 @@ async function syncGlobal() {
             document.getElementById("leaderboardList").innerHTML = lbHtml || "No secrets yet!";
         }
 
-        // FIX: Only show broadcast if it's NEWER than our last recorded time
         if(data.broadcast && data.broadcast.timestamp > lastBroadcastTime) {
             showBroadcast(data.broadcast.text);
             lastBroadcastTime = data.broadcast.timestamp;
@@ -273,7 +276,19 @@ async function syncGlobal() {
         if(data.giftTimestamp && data.giftTimestamp > lastGiftTime) {
             coins += data.giftAmount || 0;
             lastGiftTime = data.giftTimestamp;
+            localStorage.setItem('dogRNG_lastGiftTime', lastGiftTime);
             showBroadcast(`🎁 RECEIVED ${data.giftAmount} GLOBAL COINS!`);
+            saveGame();
+        }
+
+        // --- GLOBAL SPIN GIFT SYNC ---
+        if(data.globalSpinGift && data.globalSpinGift.timestamp > lastSpinGiftTime) {
+            let amount = data.globalSpinGift.amount;
+            wheelSpins += amount;
+            lastSpinGiftTime = data.globalSpinGift.timestamp;
+            localStorage.setItem('dogRNG_lastSpinGiftTime', lastSpinGiftTime);
+            showBroadcast(`🎡 ADMIN GIFT: Everyone received ${amount} Bonus Spins!`);
+            updateUI();
             saveGame();
         }
         
@@ -292,7 +307,6 @@ async function logSecretToGlobal(dogName) {
 async function adminGlobalBroadcast() {
     let msg = prompt("Enter Global Message:");
     if(msg) {
-        // FIX: Send as an object with a timestamp
         await fetch(`${FB_URL}broadcast.json`, { 
             method: 'PUT', 
             body: JSON.stringify({ text: `GLOBAL: ${msg}`, timestamp: Date.now() }) 
@@ -313,7 +327,6 @@ async function adminCustomGlobalLuck() {
     if(duration && power) {
         let luckData = { endTime: Date.now() + (parseInt(duration) * 60000), power: parseInt(power) };
         await fetch(`${FB_URL}globalLuck.json`, { method: 'PUT', body: JSON.stringify(luckData) });
-        // Use the new timestamped broadcast format
         await fetch(`${FB_URL}broadcast.json`, { 
             method: 'PUT', 
             body: JSON.stringify({ text: `🌟 GLOBAL LUCK: +${power}% for ${duration}m!`, timestamp: Date.now() }) 
@@ -321,17 +334,16 @@ async function adminCustomGlobalLuck() {
     }
 }
 
-function adminGlobalGiftDog() {
-    let allOptions = dogs.concat(secretDogs);
-    let dogOptions = allOptions.map((d, i) => `${i + 1}: ${d.name} (${d.r.toUpperCase()})`).join("\n");
-    let choice = prompt("Choose a Breed (Enter Number):\n" + dogOptions);
-    if (!choice) return;
-    let selected = allOptions[parseInt(choice) - 1];
-    if (selected) {
-        inventory.push({ name: selected.name, rarity: selected.r, type: "dog" });
-        showBroadcast(`ADMIN GIFTED EVERYONE A ${selected.r.toUpperCase()} ${selected.name}!`);
-        updateInv();
-        saveGame();
+async function adminGlobalGiftSpins() {
+    let amount = prompt("How many Wheel Spins to give everyone?", "5");
+    if (amount && !isNaN(amount)) {
+        await fetch(`${FB_URL}globalSpinGift.json`, { 
+            method: 'PUT', 
+            body: JSON.stringify({ 
+                amount: parseInt(amount), 
+                timestamp: Date.now() 
+            }) 
+        });
     }
 }
 
@@ -341,7 +353,7 @@ function adminResetAll() {
 
 /* --- SAVING SYSTEM --- */
 function saveGame() {
-    const gameState = { coins, inventory, luckEndTime, luckPower, lastWheelSpin, ownedThemes, activeThemeName, isAdmin, pollVotes, lastGiftTime, username };
+    const gameState = { coins, wheelSpins, inventory, luckEndTime, luckPower, lastWheelSpin, ownedThemes, activeThemeName, isAdmin, username };
     localStorage.setItem('dogRNG_save', JSON.stringify(gameState));
 }
 
@@ -350,6 +362,7 @@ function loadGame() {
     if (saved) {
         const data = JSON.parse(saved);
         coins = data.coins || 0;
+        wheelSpins = data.wheelSpins || 0;
         inventory = data.inventory || [];
         luckEndTime = data.luckEndTime || 0;
         luckPower = data.luckPower || 0; 
@@ -357,15 +370,12 @@ function loadGame() {
         ownedThemes = data.ownedThemes || ['Midnight'];
         activeThemeName = data.activeThemeName || 'Midnight';
         isAdmin = data.isAdmin || false;
-        pollVotes = data.pollVotes || { yes: 0, no: 0 };
-        lastGiftTime = data.lastGiftTime || 0;
         username = data.username || username;
         if(isAdmin) document.getElementById("adminTabBtn").style.display = "block";
         
         const activeThemeObj = inventory.find(i => i.type === 'theme' && i.name.startsWith(activeThemeName)) || {name:'Midnight', bg:'#1a1a2e', card:'#16213e', accent:'#533483'};
         changeTheme(activeThemeName, activeThemeObj.bg, activeThemeObj.card, activeThemeObj.accent);
         ownedThemes.forEach(t => { const btn = document.getElementById("shop-" + t); if(btn) btn.innerText = "Owned"; });
-        updatePollUI();
     }
 }
 
@@ -377,6 +387,7 @@ function tab(id) {
 
 function updateUI() {
     document.getElementById("coinCount").innerText = coins;
+    document.getElementById("spinCount").innerText = wheelSpins;
     let now = Date.now();
     if (now < luckEndTime) {
         let diff = Math.ceil((luckEndTime - now) / 1000);
@@ -396,14 +407,16 @@ function updateUI() {
         rollBtn.disabled = false;
         coolLabel.innerText = "";
     }
+    
+    // Wheel Logic: Ready if 30 mins passed OR user has bonus spins
     let wheelReadyAt = lastWheelSpin + 1800000; 
-    if (now < wheelReadyAt) {
+    if (wheelSpins > 0 || now >= wheelReadyAt) {
+        document.getElementById("wheelTimer").innerText = wheelSpins > 0 ? `Bonus Spins: ${wheelSpins}` : "Ready!";
+        document.getElementById("wheelBtn").disabled = false;
+    } else {
         let wDiff = Math.ceil((wheelReadyAt - now) / 1000);
         document.getElementById("wheelTimer").innerText = `Wait: ${Math.floor(wDiff/60)}m ${wDiff%60}s`;
         document.getElementById("wheelBtn").disabled = true;
-    } else {
-        document.getElementById("wheelTimer").innerText = "Ready!";
-        document.getElementById("wheelBtn").disabled = false;
     }
 }
 
@@ -513,9 +526,17 @@ function buyLuck(cost, mins) {
 }
 
 function spinWheel() {
-    lastWheelSpin = Date.now();
+    // If user has bonus spins, use those first without affecting the 30-min timer
+    if (wheelSpins > 0) {
+        wheelSpins--;
+    } else {
+        lastWheelSpin = Date.now();
+    }
+
     let wheelDisp = document.getElementById("wheel-display");
+    document.getElementById("wheelBtn").disabled = true;
     wheelDisp.classList.add("spinning");
+    
     setTimeout(() => {
         wheelDisp.classList.remove("spinning");
         let r = Math.random() * 100;
@@ -582,7 +603,6 @@ function adminCreatePoll() {
             showBroadcast(`POLL ENDED! Yes: ${pollVotes.yes} | No: ${pollVotes.no}`);
         }
     }, 1000);
-    // Use timestamped broadcast
     fetch(`${FB_URL}broadcast.json`, { 
         method: 'PUT', 
         body: JSON.stringify({ text: `ADMIN STARTED A ${seconds}s POLL!`, timestamp: Date.now() }) 
